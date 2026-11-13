@@ -19,6 +19,8 @@ import subprocess
 import sys
 import threading
 import time
+import urllib.error
+import urllib.request
 import webbrowser
 import winreg
 from ctypes import wintypes
@@ -343,7 +345,8 @@ SETTINGS_FILE = DATA / "settings.json"
 SMART_PARTS = ["junk", "downloads", "dupes", "memory", "security"]
 OWN_FOLDERS = list(dict.fromkeys([str(HERE), str(DATA)]))  # Go Flow never deletes itself
 DEFAULT_SETTINGS = {"protected_folders": OWN_FOLDERS, "protected_patterns": [],
-                    "smart": {p: True for p in SMART_PARTS}, "downloads_days": 60, "large_min_mb": 100}
+                    "smart": {p: True for p in SMART_PARTS}, "downloads_days": 60, "large_min_mb": 100,
+                    "virustotal_api_key": ""}
 
 
 def load_settings():
@@ -375,8 +378,9 @@ def save_settings(data):
         large = max(1, min(100000, int(data.get("large_min_mb", 100))))
     except (TypeError, ValueError):
         return {"ok": False, "message": "Numbers only, please."}
+    vt_key = str(data.get("virustotal_api_key", SETTINGS["virustotal_api_key"])).strip()[:128]
     SETTINGS.update(protected_folders=folders[:100], protected_patterns=patterns[:200], smart=smart,
-                    downloads_days=days, large_min_mb=large)
+                    downloads_days=days, large_min_mb=large, virustotal_api_key=vt_key)
     DATA.mkdir(parents=True, exist_ok=True)
     SETTINGS_FILE.write_text(json.dumps(SETTINGS, indent=1), encoding="utf-8")
     write_log("settings", {"action": "Settings saved", "ok": True})
@@ -1659,6 +1663,11 @@ def run_threat_check():
     trust = lambda p: (f"signed by {signed(p)[1]}" if signed(p)[0] == "Valid" else
                        "signature is BROKEN (file changed after signing)" if signed(p)[0] == "HashMismatch" else "not signed")
 
+    def file_acts(path, show=True):
+        return [{"kind": "scan", "path": path, "label": "Scan with Defender"},
+                {"kind": "vt", "path": path, "label": "Check with VirusTotal"}] + \
+               ([{"kind": "show", "path": path, "label": "Show file"}] if show else [])
+
     def judge(program, command):
         """(level, reasons) for something that runs automatically."""
         reasons, level = [], "ok"
@@ -1698,8 +1707,7 @@ def run_threat_check():
         acts = [{"kind": "startup_off", "id": it["id"], "label": "Turn off at startup"}] if not it["needs_admin"] else []
         if os.path.isfile(it["program"]):
             threat_paths.add(it["program"])
-            acts += [{"kind": "scan", "path": it["program"], "label": "Scan with Defender"},
-                     {"kind": "show", "path": it["program"], "label": "Show file"}]
+            acts += file_acts(it["program"])
         add(s, level, it["name"], f"{'; '.join(reasons).capitalize()}. Command: {it['command']}", acts)
     if not flagged:
         add(s, "ok", f"{sum(1 for i in startup if i['enabled'])} startup programs checked", "Nothing unusual.")
@@ -1715,7 +1723,7 @@ def run_threat_check():
         acts = [{"kind": "open", "what": "tasks", "label": "Open Task Scheduler"}]
         if os.path.isfile(t["program"]):
             threat_paths.add(t["program"])
-            acts.insert(0, {"kind": "scan", "path": t["program"], "label": "Scan with Defender"})
+            acts[0:0] = file_acts(t["program"], show=False)
         add(s, level, t["name"], f"{'; '.join(reasons).capitalize()}. Runs: {t['exe']} {t['args']}".strip(), acts)
     if not flagged:
         add(s, "ok", f"{len(tasks)} tasks checked", "Nothing unusual.")
@@ -1730,8 +1738,7 @@ def run_threat_check():
         level = "bad" if st == "HashMismatch" or risk == "temp" else "info"
         flagged += level == "bad"
         threat_paths.add(p)
-        add(s, level, os.path.basename(p), f"{trust(p).capitalize()}, running from {os.path.dirname(p)}",
-            [{"kind": "scan", "path": p, "label": "Scan with Defender"}, {"kind": "show", "path": p, "label": "Show file"}])
+        add(s, level, os.path.basename(p), f"{trust(p).capitalize()}, running from {os.path.dirname(p)}", file_acts(p))
     if not s["items"]:
         add(s, "ok", f"{len(procs)} programs checked", "All are signed by their makers.")
 
@@ -1741,17 +1748,16 @@ def run_threat_check():
         if is_eicar(f):
             threat_paths.add(f)
             add(s, "bad", os.path.basename(f), "Antivirus TEST file (EICAR). It is harmless, and finding it shows this check works. "
-                f"You can delete it. In {os.path.dirname(f)}",
-                [{"kind": "scan", "path": f, "label": "Scan with Defender"}, {"kind": "show", "path": f, "label": "Show file"}])
+                f"You can delete it. In {os.path.dirname(f)}", file_acts(f))
         if DISGUISED.search(os.path.basename(f)):
             threat_paths.add(f)
             add(s, "bad", os.path.basename(f), f"Disguised file: it looks like a document or picture but is really a program. Do not open it. In {os.path.dirname(f)}",
-                [{"kind": "scan", "path": f, "label": "Scan with Defender"}, {"kind": "show", "path": f, "label": "Show file"}])
+                file_acts(f))
     broken = [f for f in programs[:60] if signed(f)[0] == "HashMismatch"]
     for f in broken:
         threat_paths.add(f)
         add(s, "bad", os.path.basename(f), f"Its signature is broken: the file was changed after its maker signed it. In {os.path.dirname(f)}",
-            [{"kind": "scan", "path": f, "label": "Scan with Defender"}, {"kind": "show", "path": f, "label": "Show file"}])
+            file_acts(f))
     unsigned = [f for f in programs[:60] if signed(f)[0] not in ("Valid", "HashMismatch")]
     if unsigned:
         for f in unsigned[:8]:
@@ -1842,6 +1848,128 @@ def threat_action(kind, value):
             os.startfile(target)
         return {"ok": bool(target) or value == "hosts"}
     return {"ok": False, "message": "That action is not available."}
+
+
+# ---------- VirusTotal check ----------
+# A second opinion from VirusTotal.com, which scans a file with about 70
+# antivirus engines at once (Defender, Avast, Kaspersky, Bitdefender...).
+# Go Flow has no scanning engine of its own; this calls VirusTotal's own
+# service, using an API key YOU create and paste into Settings. Only a
+# SHA-256 "fingerprint" of the file is sent for the normal check; the file
+# itself is only sent if you explicitly choose "Upload for scanning" for a
+# file VirusTotal has never seen before.
+
+VT_API = "https://www.virustotal.com/api/v3"
+vtjob = {"running": False, "stage": "", "result": None, "error": ""}
+
+
+def vt_sha256(path):
+    h = hashlib.sha256()
+    with open(path, "rb") as f:
+        while chunk := f.read(1048576):
+            h.update(chunk)
+    return h.hexdigest()
+
+
+def vt_request(method, path, key, data=None, headers=None):
+    req = urllib.request.Request(f"{VT_API}{path}", data=data, method=method,
+                                 headers={"x-apikey": key, **(headers or {})})
+    try:
+        with urllib.request.urlopen(req, timeout=30) as r:
+            return r.status, json.loads(r.read().decode("utf-8"))
+    except urllib.error.HTTPError as e:
+        try:
+            return e.code, json.loads(e.read().decode("utf-8"))
+        except ValueError:
+            return e.code, {}
+    except urllib.error.URLError as e:
+        return 0, {"error": {"message": str(e.reason)}}
+
+
+def vt_verdict(attrs):
+    stats = attrs.get("last_analysis_stats") or {}
+    bad = stats.get("malicious", 0) + stats.get("suspicious", 0)
+    total = sum(stats.values()) or 1
+    return {"malicious": stats.get("malicious", 0), "suspicious": stats.get("suspicious", 0),
+            "harmless": stats.get("harmless", 0), "undetected": stats.get("undetected", 0),
+            "total": total, "bad": bad,
+            "names": (attrs.get("meaningful_name") or attrs.get("names") or [""])[0] if isinstance(attrs.get("names"), list) else attrs.get("meaningful_name", ""),
+            "reputation": attrs.get("reputation", 0), "date": attrs.get("last_analysis_date")}
+
+
+def run_vt_check(path):
+    key = SETTINGS["virustotal_api_key"]
+    if not key:
+        return {"ok": False, "need_key": True, "message": "Add a free VirusTotal API key in Settings first."}
+    if not os.path.isfile(path):
+        return {"ok": False, "message": "That file was not found."}
+    vtjob["stage"] = "Working out the file's fingerprint…"
+    sha = vt_sha256(path)
+    vtjob["stage"] = "Asking VirusTotal…"
+    status, body = vt_request("GET", f"/files/{sha}", key)
+    if status == 200:
+        v = vt_verdict(body["data"]["attributes"])
+        v.update(ok=True, known=True, sha256=sha, name=os.path.basename(path), path=path,
+                 permalink=f"https://www.virustotal.com/gui/file/{sha}")
+        return v
+    if status == 404:
+        return {"ok": True, "known": False, "sha256": sha, "name": os.path.basename(path), "path": path,
+                "message": "VirusTotal has not seen this exact file before, so there is no report yet."}
+    if status == 401:
+        return {"ok": False, "need_key": True, "message": "That VirusTotal API key was not accepted. Check it in Settings."}
+    if status == 429:
+        return {"ok": False, "message": "VirusTotal's free plan allows a few checks a minute. Wait a moment and try again."}
+    return {"ok": False, "message": (body.get("error") or {}).get("message") or f"VirusTotal could not be reached (status {status})."}
+
+
+def run_vt_upload(path):
+    key = SETTINGS["virustotal_api_key"]
+    if not key:
+        return {"ok": False, "need_key": True, "message": "Add a free VirusTotal API key in Settings first."}
+    if not os.path.isfile(path):
+        return {"ok": False, "message": "That file was not found."}
+    size = os.path.getsize(path)
+    if size > 32 * 1024 * 1024:
+        return {"ok": False, "message": "VirusTotal's free plan only accepts files up to 32 MB."}
+    vtjob["stage"] = "Uploading the file to VirusTotal…"
+    with open(path, "rb") as f:
+        content = f.read()
+    boundary = secrets.token_hex(16)
+    body = (f"--{boundary}\r\nContent-Disposition: form-data; name=\"file\"; filename=\"{os.path.basename(path)}\"\r\n"
+           "Content-Type: application/octet-stream\r\n\r\n").encode("utf-8") + content + f"\r\n--{boundary}--\r\n".encode("utf-8")
+    status, resp = vt_request("POST", "/files", key, data=body, headers={"Content-Type": f"multipart/form-data; boundary={boundary}"})
+    if status not in (200, 201):
+        if status == 401:
+            return {"ok": False, "need_key": True, "message": "That VirusTotal API key was not accepted. Check it in Settings."}
+        return {"ok": False, "message": (resp.get("error") or {}).get("message") or f"Upload failed (status {status})."}
+    analysis_id = resp["data"]["id"]
+    vtjob["stage"] = "VirusTotal is scanning it (usually under a minute)…"
+    for _ in range(40):
+        time.sleep(3)
+        s2, a = vt_request("GET", f"/analyses/{analysis_id}", key)
+        if s2 == 200 and a["data"]["attributes"]["status"] == "completed":
+            sha = a["meta"]["file_info"]["sha256"]
+            v = vt_verdict({"last_analysis_stats": a["data"]["attributes"]["stats"]})
+            v.update(ok=True, known=True, sha256=sha, name=os.path.basename(path), path=path,
+                     permalink=f"https://www.virustotal.com/gui/file/{sha}")
+            return v
+    return {"ok": False, "message": "VirusTotal is still scanning the file. Check again on its website in a minute."}
+
+
+def start_vt(path, upload=False):
+    if vtjob["running"]:
+        return {"ok": False, "message": "Already checking a file."}
+    vtjob.update(running=True, stage="Starting…", result=None, error="")
+
+    def work():
+        try:
+            vtjob["result"] = run_vt_upload(path) if upload else run_vt_check(path)
+        except Exception as ex:
+            vtjob["error"] = str(ex)
+        vtjob["running"] = False
+
+    threading.Thread(target=work, daemon=True).start()
+    return {"ok": True}
 
 
 # ---------- Storage breakdown (the donut chart on Home) ----------
@@ -2082,7 +2210,7 @@ def open_window(url):
 
 
 def busy():
-    return any(j["running"] for j in (job, fjob, rjob, sjob, ujob, tjob))
+    return any(j["running"] for j in (job, fjob, rjob, sjob, ujob, tjob, vtjob))
 
 
 def watch_window(server):
@@ -2179,6 +2307,7 @@ class Handler(BaseHTTPRequestHandler):
                   "/api/overview": overview, "/api/settings": lambda: SETTINGS, "/api/about": about,
                   "/api/smart": lambda: sjob, "/api/ping": self.ping,
                   "/api/mem": memory, "/api/storage": storage_info, "/api/threat": lambda: tjob,
+                  "/api/vt": lambda: vtjob,
                   "/api/history/all": lambda: history(400)}
         fn = routes.get(self.path)
         if fn:
@@ -2210,6 +2339,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(start_threat_check())
         elif self.path == "/api/threat/action":
             self.send_json(threat_action(data.get("kind"), data.get("value")))
+        elif self.path == "/api/vt/check":
+            self.send_json(start_vt(data.get("path"), upload=False))
+        elif self.path == "/api/vt/upload":
+            self.send_json(start_vt(data.get("path"), upload=True))
         elif self.path == "/api/storage/refresh":
             self.send_json(storage_info(refresh=True))
         elif self.path == "/api/smart/scan":

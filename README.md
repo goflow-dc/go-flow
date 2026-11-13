@@ -22,7 +22,14 @@ local page at http://127.0.0.1:8770 that no other computer or website can reach.
   types, the EICAR test file) and the hosts file. Signatures come from Windows' own check
   (`Get-AuthenticodeSignature`); startup shortcuts are followed to the real program. It is not an
   antivirus engine: findings offer safe actions only (scan with Defender, show the file, turn off at
-  startup, open the Windows setting) and nothing is deleted.
+  startup, open the Windows setting, check with VirusTotal) and nothing is deleted.
+- **VirusTotal second opinion** (Virus scan, and "Check with VirusTotal" on Threat check findings):
+  needs your own free API key, pasted into Settings (get one at virustotal.com, no cost). The normal
+  check only sends a SHA-256 fingerprint of the file, never the file itself, and asks whether
+  VirusTotal has already seen that exact file and what roughly 70 antivirus engines said about it.
+  If VirusTotal has never seen the file, you can choose "Upload for scanning" (up to 32 MB), which
+  does send the file itself — that is a separate, explicitly confirmed step, never automatic. Go Flow
+  has no scanning engine of its own; this only calls VirusTotal's own public API over HTTPS.
 - **Graphics:** Home has a storage donut (sizes of Downloads, Documents, Pictures, Videos, Music,
   Desktop, OneDrive and App data; everything else used = "Windows and programs"; measured in the
   background, about 30 seconds, remembered for an hour in `logs\storage_cache.json`; click a folder

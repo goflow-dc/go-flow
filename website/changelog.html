@@ -29,6 +29,16 @@
 
     <!-- Newest version first. Copy this block for each new release. -->
     <div class="release">
+      <h2>Version 1.2.0</h2>
+      <p class="muted">VirusTotal second opinion</p>
+      <ul>
+        <li><b>New: a second opinion from VirusTotal.</b> Check one file against roughly 70 antivirus engines at once, from the Virus scan screen or directly from a Threat Check finding. Needs your own free API key, added once in Settings.</li>
+        <li>Only a SHA-256 fingerprint of the file is sent for the normal check, never the file's content. If VirusTotal has not seen that file before, you can separately choose to upload it (up to 32 MB) — a deliberate extra step, never automatic.</li>
+        <li>Go Flow still has no antivirus engine of its own; this calls VirusTotal's own public service over HTTPS, using the key you provide.</li>
+      </ul>
+    </div>
+
+    <div class="release">
       <h2>Version 1.1.0</h2>
       <p class="muted">Threat Check</p>
       <ul>

@@ -38,12 +38,13 @@
     </ul>
 
     <h2>When the internet is used</h2>
-    <p>Go Flow itself does not contact any server. Two of its screens ask Windows to do something that uses the internet, the same as if you did it in Windows Settings:</p>
+    <p>Go Flow itself does not contact any server on its own. A few of its screens ask another service to do something, only when you choose to use that feature, the same as if you did it yourself in Windows Settings or a browser:</p>
     <ul>
       <li><b>Updates:</b> asks Windows Update whether updates are waiting (this contacts Microsoft).</li>
       <li><b>Virus scan:</b> "Update virus definitions" asks Microsoft Defender to download new definitions (this contacts Microsoft).</li>
+      <li><b>VirusTotal second opinion:</b> only if you add your own free VirusTotal API key in Settings and press "Check with VirusTotal" on a file. The normal check sends only a SHA-256 fingerprint of that one file to VirusTotal, never its content and never any other file on your PC. If you go on to press the separate "Upload for scanning" button for a file VirusTotal has not seen before, that file's content is sent to VirusTotal. Your API key is stored only on your own PC and is sent only to VirusTotal, never anywhere else.</li>
     </ul>
-    <p>Microsoft's own privacy policy applies to those services.</p>
+    <p>Microsoft's and VirusTotal's own privacy policies apply to those services.</p>
 
     <h2>This website</h2>
     <ul>

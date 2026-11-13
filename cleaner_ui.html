@@ -454,6 +454,14 @@ button.primary:active,button.danger:active{transform:scale(.97)}
         <label class="sub">Large files are bigger than <input type="number" id="setLarge" min="1"> MB</label>
       </div>
     </div>
+    <div class="field">
+      <b>VirusTotal API key</b>
+      <div class="sub">Optional. Lets Threat Check and Virus scan ask VirusTotal for a second opinion from about 70 antivirus engines.
+        Get a free key at <a href="https://www.virustotal.com/gui/my-apikey" target="_blank" rel="noopener">virustotal.com</a> (free account, then copy the key on that page).
+        Only a fingerprint (SHA-256) of a file is sent for the normal check; the file itself is sent only if you choose "Upload for scanning".
+        Saved on this laptop only, never sent anywhere except to VirusTotal when you use this feature.</div>
+      <input type="text" id="setVtKey" placeholder="Paste your VirusTotal API key here" style="width:100%;margin-top:8px" spellcheck="false">
+    </div>
     <div class="row" style="margin-top:20px">
       <button class="primary" id="setSave">Save settings</button>
     </div>
@@ -469,8 +477,10 @@ button.primary:active,button.danger:active{transform:scale(.97)}
       </div>
     </div>
     <p>Go Flow keeps your Windows laptop clean, fast and safe: it removes junk, finds big and duplicate files, frees memory, and works with your antivirus and Windows Update.</p>
-    <p class="sub">Everything runs on this laptop. Go Flow has no account, no ads and no tracking, and it never uploads your files or data.
-      The internet is only used when you ask Windows to check for updates or new virus definitions. Nothing is deleted without your confirmation.</p>
+    <p class="sub">Everything runs on this laptop. Go Flow has no account, no ads and no tracking, and it never sends your files or data anywhere on its own.
+      The internet is only used when you ask Windows to check for updates or new virus definitions, or when you choose to check a file with VirusTotal
+      (only after you add your own free API key in Settings — only a fingerprint of the file is sent, unless you explicitly choose to upload it).
+      Nothing is deleted without your confirmation.</p>
     <div class="stats" id="abStats"></div>
     <div class="row" style="margin-top:16px">
       <button id="abFolder">Open Go Flow folder</button>
@@ -541,6 +551,15 @@ button.primary:active,button.danger:active{transform:scale(.97)}
     <div id="jobMsg" class="msg hidden"></div>
     <h2 style="margin-top:20px">Threats found</h2>
     <div id="threats" class="sub">Loading…</div>
+
+    <h2 style="margin-top:28px">Second opinion: VirusTotal</h2>
+    <div class="sub">Checks one file against about 70 antivirus engines at once. Needs a free API key in Settings.</div>
+    <div class="row" style="margin-top:10px">
+      <input type="text" id="vtPath" placeholder="Full path to a file, e.g. C:\Users\me\Downloads\something.exe">
+      <button id="vtCheckBtn">Check with VirusTotal</button>
+    </div>
+    <div id="vtMsg" class="msg hidden"></div>
+    <div id="vtOut"></div>
   </section>
 
   <section class="card hidden" data-panel="threat">
@@ -1521,6 +1540,7 @@ function drawThreat(res) {
       </div></div>`).join("") + "</div>").join("");
   $("thOut").querySelectorAll("[data-kind]").forEach(b => b.onclick = async () => {
     const kind = b.dataset.kind;
+    if (kind === "vt") { openTab("virus"); $("vtPath").value = b.dataset.value; runVt(b.dataset.value, false); return; }
     if (kind === "startup_off" && !await ask("Turn this off at startup?", b.closest(".finding").querySelector("b").textContent,
       "The program stays installed. You can turn it back on in Startup apps.", "Turn off")) return;
     const r = await api("/api/threat/action", { kind, value: b.dataset.value });
@@ -1543,6 +1563,51 @@ $("thBtn").onclick = async () => {
   };
   tick();
 };
+
+// ---- VirusTotal second opinion ----
+function drawVt(v) {
+  if (!v.known) {
+    $("vtOut").innerHTML = `<div class="verdict warn"><span class="vi">${icon("info")}</span><span>
+      <b>Not in VirusTotal's database yet</b><span class="sub">${esc(v.message || "")} Its fingerprint: ${esc(v.sha256)}</span></span></div>
+      <div class="row" style="margin-top:12px"><button class="small" id="vtUploadBtn">Upload for scanning (sends the file itself to VirusTotal)</button></div>`;
+    $("vtUploadBtn").onclick = async () => {
+      if (!await ask("Upload this file to VirusTotal?", v.name,
+        "Unlike the normal check, this sends the whole file to VirusTotal's servers, not just a fingerprint. Only do this for a file you are unsure about.", "Upload and scan")) return;
+      runVt(v.path, true);
+    };
+    return;
+  }
+  const level = v.bad >= 3 ? "bad" : v.bad > 0 ? "warn" : "ok";
+  const title = v.bad >= 3 ? `${v.bad} of ${v.total} antivirus engines flag this file`
+    : v.bad > 0 ? `${v.bad} of ${v.total} engines flag this file (could be a false alarm)`
+    : `No engines flag this file (0 of ${v.total})`;
+  $("vtOut").innerHTML = `<div class="verdict ${level}"><span class="vi">${icon(level === "ok" ? "check" : "alert")}</span><span>
+      <b>${esc(title)}</b><span class="sub">${esc(v.name)}${v.date ? " · checked " + new Date(v.date * 1000).toLocaleDateString() : ""}</span></span></div>
+    <div class="row" style="margin-top:10px"><a class="small" href="${esc(v.permalink)}" target="_blank" rel="noopener"><button class="small">Full report on VirusTotal</button></a></div>`;
+}
+async function runVt(path, upload) {
+  if (!path) return;
+  $("vtCheckBtn").disabled = true; $("vtMsg").classList.add("hidden");
+  const start = await api(upload ? "/api/vt/upload" : "/api/vt/check", { path });
+  if (!start.ok) { $("vtCheckBtn").disabled = false; return show($("vtMsg"), start.message, true); }
+  $("vtOut").innerHTML = `<div class="smart-run" style="margin-top:14px"><div class="radar"><i></i><i></i><i></i><span>${icon("virus")}</span></div>
+    <div><h2>Checking…</h2><div class="sub" id="vtProg">Starting…</div></div></div>`;
+  const tick = async () => {
+    const j = await api("/api/vt");
+    if (j.running) { const p = $("vtProg"); if (p) p.textContent = j.stage; return setTimeout(tick, 1000); }
+    $("vtCheckBtn").disabled = false;
+    if (j.error) { $("vtOut").innerHTML = ""; return show($("vtMsg"), "Something went wrong: " + j.error, true); }
+    const r = j.result;
+    if (!r.ok) {
+      $("vtOut").innerHTML = ""; show($("vtMsg"), r.message, true);
+      if (r.need_key) { openTab("settings"); show($("setMsg"), r.message, true); $("setVtKey").focus(); }
+      return;
+    }
+    drawVt(r);
+  };
+  tick();
+}
+$("vtCheckBtn").onclick = () => runVt($("vtPath").value.trim(), false);
 
 // ---- small effects ----
 function countUp(el, to, fmt, ms) {
@@ -1654,13 +1719,14 @@ async function loadSettings() {
   $("setSmart").innerHTML = Object.keys(SMART_NAMES).map(k =>
     `<label><input type="checkbox" data-smart="${k}" ${s.smart[k] ? "checked" : ""}> ${SMART_NAMES[k]}</label>`).join("");
   $("setDays").value = s.downloads_days; $("setLarge").value = s.large_min_mb;
+  $("setVtKey").value = s.virustotal_api_key || "";
 }
 $("setSave").onclick = async () => {
   const lines = id => $(id).value.split("\n").map(x => x.trim()).filter(Boolean);
   const r = await api("/api/settings", {
     protected_folders: lines("setFolders"), protected_patterns: lines("setPatterns"),
     smart: Object.fromEntries([...$("setSmart").querySelectorAll("[data-smart]")].map(x => [x.dataset.smart, x.checked])),
-    downloads_days: $("setDays").value, large_min_mb: $("setLarge").value });
+    downloads_days: $("setDays").value, large_min_mb: $("setLarge").value, virustotal_api_key: $("setVtKey").value.trim() });
   show($("setMsg"), r.ok ? "Settings saved." : r.message, !r.ok);
   if (r.ok) { applyDefaults(r.settings); loadSettings(); }
 };
