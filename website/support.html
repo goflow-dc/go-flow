@@ -1,0 +1,91 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Support and FAQ: Go Flow</title>
+<meta name="description" content="Help with installing and using Go Flow: Windows warnings, Smart App Control, what is safe to clean, uninstalling, and how to get in touch.">
+<link rel="icon" type="image/png" href="img/icon.png">
+<link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+<header class="top">
+  <div class="wrap">
+    <a class="brand" href="index.html"><img src="img/icon.png" alt="" width="34" height="34">Go Flow</a>
+    <nav class="nav" aria-label="Main">
+      <a href="index.html#features">Features</a>
+      <a href="support.html" aria-current="page">Support</a>
+      <a href="changelog.html">Changelog</a>
+      <a class="btn primary small" data-download href="#">Download</a>
+    </nav>
+  </div>
+</header>
+
+<main class="page">
+  <div class="wrap">
+    <h1>Support</h1>
+    <p class="muted">Answers to common questions. Still stuck? See Contact at the bottom.</p>
+
+    <h2 id="download">Installing</h2>
+    <details open>
+      <summary>How do I install Go Flow?</summary>
+      <ol>
+        <li>Press <a data-download href="#">Download</a> and open <code>GoFlow-Setup.exe</code>.</li>
+        <li>If Windows shows "Windows protected your PC", click <b>More info</b>, then <b>Run anyway</b>.</li>
+        <li>Follow the installer. Go Flow appears in the Start menu.</li>
+      </ol>
+      <p>Needs Windows 10 or 11 (64-bit) and Microsoft Edge, which Windows already includes.</p>
+    </details>
+    <details>
+      <summary>Why does Windows show a warning?</summary>
+      <p>Windows SmartScreen warns about any new app that is not yet signed with a paid code-signing certificate, until enough people have installed it. It is not a sign of a virus. To be sure your download is the real one, compare it with the published <a data-checksum href="#">SHA-256 checksum</a>: in PowerShell, run <code>Get-FileHash GoFlow-Setup.exe</code> and check the two values match.</p>
+    </details>
+    <details id="smart-app-control">
+      <summary>It says "An Application Control policy has blocked this file"</summary>
+      <p>Your PC has <b>Smart App Control</b> turned on (Windows Security, App &amp; browser control). It blocks every app that is not signed with a trusted certificate, and there is no "Run anyway" button. Go Flow is not signed yet, so it cannot run on that PC for now.</p>
+      <div class="note">We do not recommend turning Smart App Control off just for Go Flow. Once it is off, Windows cannot turn it back on without resetting the PC.</div>
+    </details>
+    <details>
+      <summary>My antivirus flagged the installer</summary>
+      <p>Cleaner apps are sometimes flagged by mistake because they delete files and change startup settings. Check the checksum above. If it matches, you can report a false positive to your antivirus maker, and please let us know too.</p>
+    </details>
+
+    <h2>Using Go Flow</h2>
+    <details>
+      <summary>What is safe to clean?</summary>
+      <p>Everything the Junk cleaner lists is safe: temp files, caches and leftovers that Windows and browsers rebuild when needed. Browser passwords, history and logins are not touched. For large files, duplicates and downloads, you choose each file, and they go to the Recycle Bin.</p>
+    </details>
+    <details>
+      <summary>What does "Go Flow (Admin)" do?</summary>
+      <p>It starts Go Flow with administrator rights, which Windows asks you to approve. That adds: cleaning Windows system temp and update folders, creating restore points, changing startup apps that belong to all users, and showing disk temperature.</p>
+    </details>
+    <details>
+      <summary>Does the memory boost really help?</summary>
+      <p>It asks apps to give back memory they are not using, which helps when memory is nearly full. Windows fills memory again over time, so the lasting fix is closing apps you are not using. Go Flow shows which ones use the most.</p>
+    </details>
+    <details>
+      <summary>How do I protect a folder from ever being cleaned?</summary>
+      <p>Open Settings in Go Flow and add the folder under "Protected folders". Its files still show in results, marked "Kept", but cannot be removed.</p>
+    </details>
+    <details>
+      <summary>How do I uninstall Go Flow?</summary>
+      <p>Windows Settings, Apps, Installed apps, Go Flow, Uninstall. Your settings and history stay in <code>%LOCALAPPDATA%\GoFlow</code>; delete that folder too if you want everything gone.</p>
+    </details>
+
+    <h2 id="contact">Contact</h2>
+    <p>Found a bug or have an idea? Reach us at <span data-email></span>. Please include your Windows version and what you were doing when the problem happened.</p>
+  </div>
+</main>
+
+<footer>
+  <div class="wrap">
+    <div>© <span data-year>2026</span> <span data-owner>Go Flow</span></div>
+    <div><a href="privacy.html">Privacy</a><a href="support.html">Support</a><a href="changelog.html">Changelog</a></div>
+  </div>
+</footer>
+
+<script src="config.js"></script>
+<script src="site.js"></script>
+</body>
+</html>

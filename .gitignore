@@ -1,0 +1,14 @@
+# Build output and tools
+.build-venv/
+build/
+dist/
+GoFlow.spec
+__pycache__/
+
+# Your own data: never upload these
+logs/
+settings.json
+
+# Old copies and editor/assistant files
+versions/
+.claude/

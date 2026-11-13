@@ -1,0 +1,70 @@
+# Builds GoFlow-Setup.exe on a Windows machine at GitHub and attaches it to the Release.
+# Runs when you publish a Release (GitHub website: Releases > Draft a new release > Publish).
+name: Build installer
+
+on:
+  release:
+    types: [published]
+  workflow_dispatch:   # "Run workflow" button, to test a build without making a release
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Read version and check it matches the tag
+        shell: pwsh
+        run: |
+          $version = (Get-Content version.txt -Raw).Trim()
+          "VERSION=$version" >> $env:GITHUB_ENV
+          if ("${{ github.event_name }}" -eq "release" -and "${{ github.event.release.tag_name }}" -ne "v$version") {
+            throw "Tag ${{ github.event.release.tag_name }} does not match version.txt ($version). Change version.txt first, then release v$version."
+          }
+
+      - name: Build GoFlow.exe
+        shell: pwsh
+        run: |
+          python -m pip install --quiet pyinstaller
+          python -m PyInstaller --noconfirm --clean --noconsole --onedir --name GoFlow `
+            --icon assets\icon.ico `
+            --add-data "cleaner_ui.html;." --add-data "version.txt;." --add-data "assets;assets" cleaner.py
+
+      - name: Check the program starts
+        shell: pwsh
+        run: |
+          $p = Start-Process dist\GoFlow\GoFlow.exe -ArgumentList '--port','8799','--no-browser' -PassThru
+          Start-Sleep 6
+          $r = Invoke-WebRequest http://127.0.0.1:8799/ -UseBasicParsing
+          Stop-Process -Id $p.Id -Force
+          if ($r.Content -notmatch '<title>Go Flow</title>') { throw "GoFlow.exe did not serve its page" }
+
+      - name: Build the installer
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          & "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe" /Qp "/DAppVersion=$env:VERSION" installer\setup.iss
+          $hash = (Get-FileHash dist\GoFlow-Setup.exe -Algorithm SHA256).Hash.ToLower()
+          "$hash  GoFlow-Setup.exe" | Out-File dist\GoFlow-Setup.exe.sha256 -Encoding ascii
+          "SHA-256: $hash"
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: GoFlow-Setup
+          path: |
+            dist/GoFlow-Setup.exe
+            dist/GoFlow-Setup.exe.sha256
+
+      - name: Attach to the Release
+        if: github.event_name == 'release'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh release upload "${{ github.event.release.tag_name }}" dist/GoFlow-Setup.exe dist/GoFlow-Setup.exe.sha256 --clobber
