@@ -1437,6 +1437,413 @@ def overview():
     return o
 
 
+# ---------- Threat Check ----------
+# Looks for signs of trouble that a virus scan can miss: protection switched
+# off, odd things starting with Windows, unsigned programs running from temp
+# folders, disguised files, a changed hosts file or proxy. It is NOT an
+# antivirus engine: it only reads and reports, and never deletes on a guess.
+
+THREAT_PS = r"""
+$o=[ordered]@{}
+$o.firewall=@(Get-NetFirewallProfile -ErrorAction SilentlyContinue | ForEach-Object { [pscustomobject]@{name=[string]$_.Name; on=[bool]$_.Enabled} })
+$o.uac=[int](Get-ItemProperty 'HKLM:\SOFTWARE\Microsoft\Windows\CurrentVersion\Policies\System' -ErrorAction SilentlyContinue).EnableLUA
+$s=Get-MpComputerStatus -ErrorAction SilentlyContinue
+$o.rt=[bool]$s.RealTimeProtectionEnabled; $o.tamper=[bool]$s.IsTamperProtected; $o.sac=[string]$s.SmartAppControlState
+$o.rdp=((Get-ItemProperty 'HKLM:\SYSTEM\CurrentControlSet\Control\Terminal Server' -ErrorAction SilentlyContinue).fDenyTSConnections -eq 0)
+$p=Get-ItemProperty 'HKCU:\Software\Microsoft\Windows\CurrentVersion\Internet Settings' -ErrorAction SilentlyContinue
+$o.proxy_on=[int]$p.ProxyEnable; $o.proxy=[string]$p.ProxyServer; $o.pac=[string]$p.AutoConfigURL
+$o.excl=@(); try { $m=Get-MpPreference -ErrorAction Stop
+  $o.excl=@(@($m.ExclusionPath)+@($m.ExclusionProcess)+@($m.ExclusionExtension) | Where-Object { $_ } | ForEach-Object { [string]$_ }) } catch {}
+$o.tasks=@(Get-ScheduledTask -ErrorAction SilentlyContinue | Where-Object { $_.TaskPath -notlike '\Microsoft\*' -and $_.State -ne 'Disabled' } | ForEach-Object {
+  $t=$_; $_.Actions | Where-Object { $_.Execute } | ForEach-Object { [pscustomobject]@{name=[string]$t.TaskName; exe=[string]$_.Execute; args=[string]$_.Arguments} } })
+$o.procs=@(Get-Process | Where-Object { $_.Path } | Select-Object -ExpandProperty Path -Unique)
+$o.av=@($av)
+$o | ConvertTo-Json -Depth 4 -Compress
+"""
+
+SUSPICIOUS_CMD = [(r"-e(nc|ncodedcommand)?\s+[a-z0-9+/=]{20,}", "runs a hidden, encoded PowerShell command"),
+                  (r"frombase64string", "decodes hidden code"),
+                  (r"\bmshta(\.exe)?\b", "uses mshta, a tool malware often abuses"),
+                  (r"regsvr32.*(scrobj|/i:http)", "uses regsvr32 to run a script"),
+                  (r"rundll32.*(javascript|vbscript)", "uses rundll32 to run a script"),
+                  (r"certutil.*-urlcache", "downloads a file with certutil"),
+                  (r"\bbitsadmin\b.*(/transfer|/addfile)", "downloads a file with bitsadmin"),
+                  (r"(downloadstring|downloadfile|invoke-webrequest|\biwr\b|\bcurl\b).*https?://", "downloads something from the internet"),
+                  (r"-w(indowstyle)?\s+h(idden)?\b", "runs in a hidden window")]
+SCRIPT_EXT = {".vbs", ".vbe", ".js", ".jse", ".wsf", ".hta", ".ps1", ".bat", ".cmd", ".scr", ".pif", ".com"}
+DISGUISED = re.compile(r"\.(pdf|docx?|xlsx?|pptx?|jpe?g|png|gif|txt|mp[34]|zip|rar)\s*\.(exe|scr|com|bat|cmd|pif|vbs|js|hta|lnk|msi)$", re.I)
+HOSTS_WATCH = ("microsoft", "windowsupdate", "google", "facebook", "paypal", "amazon", "apple", "bank",
+               "netflix", "github", "kaspersky", "avast", "avg", "norton", "mcafee", "malwarebytes", "bitdefender")
+
+# The EICAR test file: a harmless 68-character file every antivirus agrees to
+# detect, used to prove a scanner works (eicar.org). Kept in pieces so this
+# source file is not itself mistaken for the test file.
+EICAR = ("X5O!P%@AP[4\\PZX54(P^)7CC)7}$" + "EICAR-STANDARD-ANTI" + "VIRUS-TEST-FILE!$H+H*").encode("ascii")
+
+
+def is_eicar(path):
+    """True for the standard test file: it must start with the test text and be tiny (at most 128 bytes)."""
+    try:
+        if os.path.getsize(path) > 128:
+            return False
+        with open(path, "rb") as f:
+            data = f.read(129)
+    except OSError:
+        return False
+    return data.startswith(EICAR) and not data[len(EICAR):].strip(b" \t\r\n\x1a")
+
+
+tjob = {"running": False, "progress": "", "result": None, "error": ""}
+threat_paths = set()  # files this check listed: only these may be shown in Explorer or sent to Defender
+
+
+def cmd_program(cmd):
+    """The program file a command line starts, with %VARIABLES% filled in."""
+    cmd = os.path.expandvars(cmd or "").strip()
+    m = re.match(r'^"([^"]+)"', cmd) or re.match(r"^(.+?\.(?:exe|com|bat|cmd|vbs|js|ps1|scr|msi|lnk))(?:\s|$)", cmd, re.I)
+    return m.group(1) if m else cmd.split(" ")[0]
+
+
+def location_risk(path):
+    """'temp' for throw-away places malware likes, 'user' for anywhere you can write without admin rights."""
+    p = os.path.normcase(os.path.abspath(path)) if path else ""
+    inside = lambda d: p.startswith(os.path.normcase(str(d)).rstrip("\\") + "\\")
+    if any(inside(d) for d in (TEMP, LOCAL / "Temp", WINDIR / "Temp", HOME / "Downloads",
+                               Path(os.environ.get("PUBLIC", r"C:\Users\Public")))):
+        return "temp"
+    if inside(HOME) or inside(PROGRAMDATA):
+        return "user"
+    return ""
+
+
+def signatures(paths):
+    """{path: (status, signer)} from Windows' own signature check."""
+    paths = [p for p in dict.fromkeys(paths) if p and os.path.isfile(p)][:150]
+    if not paths:
+        return {}
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    listing = LOG_DIR / "threat_paths.json"
+    listing.write_text(json.dumps(paths), encoding="utf-8")
+    # The parentheses matter: Windows PowerShell hands a JSON list on as ONE object unless it is wrapped.
+    r = powershell(f"ConvertTo-Json -Compress -InputObject @((Get-Content -Raw -Encoding UTF8 {ps_quote(listing)} | ConvertFrom-Json) | ForEach-Object {{"
+                   " $s=Get-AuthenticodeSignature -LiteralPath $_ -ErrorAction SilentlyContinue;"
+                   " [pscustomobject]@{path=$_; status=[string]$s.Status;"
+                   " signer=$(if($s.SignerCertificate){$s.SignerCertificate.Subject}else{''})} })", timeout=300)
+    try:
+        listing.unlink()
+    except OSError:
+        pass
+    out = {}
+    try:
+        for row in json.loads(r["out"] or "[]"):
+            m = re.search(r"CN=\"?([^,\"]+)", row.get("signer") or "")
+            out[os.path.normcase(row["path"])] = (row.get("status") or "", m.group(1) if m else "")
+    except ValueError:
+        pass
+    return out
+
+
+def shortcut_targets(links):
+    """{shortcut: program it opens} for .lnk files, so the real program is judged, not the shortcut."""
+    links = [l for l in dict.fromkeys(links) if os.path.isfile(l)]
+    if not links:
+        return {}
+    LOG_DIR.mkdir(parents=True, exist_ok=True)
+    listing = LOG_DIR / "threat_links.json"
+    listing.write_text(json.dumps(links), encoding="utf-8")
+    r = powershell(f"$w=New-Object -ComObject WScript.Shell; ConvertTo-Json -Compress -InputObject @((Get-Content -Raw -Encoding UTF8 {ps_quote(listing)} | ConvertFrom-Json) |"
+                   " ForEach-Object { [pscustomobject]@{link=$_; target=[string]$w.CreateShortcut($_).TargetPath} })", timeout=60)
+    try:
+        listing.unlink()
+    except OSError:
+        pass
+    try:
+        return {row["link"]: row["target"] for row in json.loads(r["out"] or "[]") if row.get("target")}
+    except ValueError:
+        return {}
+
+
+def run_threat_check():
+    res = {"sections": []}
+    say = lambda t: tjob.update(progress=t)
+
+    def section(title, about):
+        s = {"title": title, "about": about, "items": []}
+        res["sections"].append(s)
+        return s
+
+    def add(s, level, title, detail="", actions=None):
+        s["items"].append({"level": level, "title": title, "detail": detail, "actions": actions or []})
+
+    say("Reading protection settings…")
+    r = powershell(AV_PS + THREAT_PS, timeout=180)
+    try:
+        d = json.loads(r["out"])
+    except ValueError:
+        d = {}
+
+    # 1. Protection
+    s = section("Protection", "Is this laptop's own protection switched on?")
+    others = [n for n in d.get("av") or [] if n and "defender" not in n.lower()]
+    if d.get("rt"):
+        add(s, "ok", "Antivirus is on", "Microsoft Defender is protecting this laptop in real time.")
+    elif others:
+        add(s, "ok", "Antivirus is on", f"{others[0]} is protecting this laptop (Microsoft Defender is on standby).")
+    else:
+        add(s, "bad", "No antivirus is running", "Real-time protection is off. Turn on Microsoft Defender in Windows Security.",
+            [{"kind": "open", "what": "security", "label": "Open Windows Security"}])
+    off = [f["name"] for f in d.get("firewall") or [] if not f["on"]]
+    if off:
+        add(s, "bad", "Firewall is off", f"Off for: {', '.join(off)} network. The firewall blocks unwanted connections.",
+            [{"kind": "open", "what": "firewall", "label": "Open Firewall"}])
+    elif d.get("firewall"):
+        add(s, "ok", "Firewall is on", "On for all network types.")
+    if d.get("uac") == 0:
+        add(s, "bad", "Windows permission prompts (UAC) are off",
+            "Programs can make system changes without asking you. Malware often switches this off.",
+            [{"kind": "open", "what": "uac", "label": "Open UAC settings"}])
+    else:
+        add(s, "ok", "Windows permission prompts (UAC) are on")
+    if d.get("sac") == "On":
+        add(s, "ok", "Smart App Control is on", "Windows blocks unknown and unsigned apps before they run.")
+    if d.get("rdp"):
+        add(s, "warn", "Remote Desktop is on", "Other computers can try to sign in to this one. Turn it off if you do not use it.",
+            [{"kind": "open", "what": "rdp", "label": "Open Remote Desktop settings"}])
+    if d.get("proxy_on") and d.get("proxy"):
+        add(s, "warn", "A proxy is set", f"Your web traffic goes through {d['proxy']}. If you did not set this (work or VPN), remove it.",
+            [{"kind": "open", "what": "proxy", "label": "Open proxy settings"}])
+    if d.get("pac"):
+        add(s, "warn", "A proxy script is set", f"Windows loads proxy rules from {d['pac']}. Remove it if you did not set it.",
+            [{"kind": "open", "what": "proxy", "label": "Open proxy settings"}])
+    excl = [e for e in d.get("excl") or [] if not e.startswith("N/A")]
+    hidden = any(e.startswith("N/A") for e in d.get("excl") or [])
+    if excl:
+        add(s, "warn", f"{len(excl)} antivirus exclusion(s)", "Defender skips these, so malware likes to add itself here: "
+            + "; ".join(excl[:6]) + (" …" if len(excl) > 6 else ""),
+            [{"kind": "open", "what": "security", "label": "Open Windows Security"}])
+    elif hidden:
+        add(s, "info", "Antivirus exclusions not checked", "Windows only shows them to administrators. Open Go Flow (Admin) to check.")
+
+    # Collect programs to check signatures for, in one go
+    say("Looking at startup programs…")
+    startup = list_startup()
+    for it in startup:
+        it["program"] = cmd_program(it["command"])
+    targets = shortcut_targets([it["program"] for it in startup if it["program"].lower().endswith(".lnk")])
+    for it in startup:
+        it["program"] = targets.get(it["program"], it["program"])
+    tasks = [t for t in d.get("tasks") or [] if not t["name"].startswith("GoFlow")]
+    for t in tasks:
+        t["program"] = cmd_program(t["exe"])
+    procs = [p for p in d.get("procs") or [] if location_risk(p)]
+    say("Looking at Downloads and Desktop…")
+    loose = []
+    for root in (DOWNLOADS, HOME / "Desktop"):
+        try:
+            entries = list(os.scandir(root))
+        except OSError:
+            continue
+        for e in entries:
+            try:
+                if e.is_file(follow_symlinks=False):
+                    loose.append(e.path)
+                elif e.is_dir(follow_symlinks=False) and not keep_reason(e.path):
+                    loose += [x.path for x in list(os.scandir(e.path))[:400] if x.is_file(follow_symlinks=False)]
+            except OSError:
+                pass
+    loose = loose[:6000]
+    programs = [f for f in loose if Path(f).suffix.lower() in (".exe", ".msi", ".scr", ".com")]
+    say("Checking program signatures…")
+    sig = signatures([it["program"] for it in startup] + [t["program"] for t in tasks] + procs + programs[:60])
+    signed = lambda p: sig.get(os.path.normcase(p), ("", ""))
+    trust = lambda p: (f"signed by {signed(p)[1]}" if signed(p)[0] == "Valid" else
+                       "signature is BROKEN (file changed after signing)" if signed(p)[0] == "HashMismatch" else "not signed")
+
+    def judge(program, command):
+        """(level, reasons) for something that runs automatically."""
+        reasons, level = [], "ok"
+        for pat, why in SUSPICIOUS_CMD:
+            if re.search(pat, command, re.I):
+                reasons.append(why)
+                level = "bad"
+        if program and not os.path.isfile(program) and "\\" in program:
+            reasons.append("its file no longer exists")
+            level = max(level, "info", key=["ok", "info", "warn", "bad"].index)
+        elif os.path.isfile(program):
+            st, risk = signed(program)[0], location_risk(program)
+            if st == "HashMismatch":
+                reasons.append("its signature is broken (the file was changed)")
+                level = "bad"
+            elif st != "Valid" and risk == "temp":
+                reasons.append("it is not signed and runs from a temp or download folder")
+                level = max(level, "bad", key=["ok", "info", "warn", "bad"].index)
+            elif st != "Valid" and risk == "user":
+                reasons.append("it is not signed and sits in your user folder")
+                level = max(level, "warn", key=["ok", "info", "warn", "bad"].index)
+            if Path(program).suffix.lower() in SCRIPT_EXT - {".bat", ".cmd", ".ps1"}:
+                reasons.append("it is a script, not a normal program")
+                level = max(level, "warn", key=["ok", "info", "warn", "bad"].index)
+        return level, reasons
+
+    # 2. Startup programs
+    s = section("Starts with Windows", "Programs that launch by themselves when you sign in.")
+    flagged = 0
+    for it in startup:
+        if not it["enabled"]:
+            continue
+        level, reasons = judge(it["program"], it["command"])
+        if level == "ok":
+            continue
+        flagged += 1
+        acts = [{"kind": "startup_off", "id": it["id"], "label": "Turn off at startup"}] if not it["needs_admin"] else []
+        if os.path.isfile(it["program"]):
+            threat_paths.add(it["program"])
+            acts += [{"kind": "scan", "path": it["program"], "label": "Scan with Defender"},
+                     {"kind": "show", "path": it["program"], "label": "Show file"}]
+        add(s, level, it["name"], f"{'; '.join(reasons).capitalize()}. Command: {it['command']}", acts)
+    if not flagged:
+        add(s, "ok", f"{sum(1 for i in startup if i['enabled'])} startup programs checked", "Nothing unusual.")
+
+    # 3. Scheduled tasks
+    s = section("Scheduled tasks", "Jobs Windows runs in the background on a timer (Microsoft's own are skipped).")
+    flagged = 0
+    for t in tasks:
+        level, reasons = judge(t["program"], f"{t['exe']} {t['args']}")
+        if level in ("ok", "info"):
+            continue
+        flagged += 1
+        acts = [{"kind": "open", "what": "tasks", "label": "Open Task Scheduler"}]
+        if os.path.isfile(t["program"]):
+            threat_paths.add(t["program"])
+            acts.insert(0, {"kind": "scan", "path": t["program"], "label": "Scan with Defender"})
+        add(s, level, t["name"], f"{'; '.join(reasons).capitalize()}. Runs: {t['exe']} {t['args']}".strip(), acts)
+    if not flagged:
+        add(s, "ok", f"{len(tasks)} tasks checked", "Nothing unusual.")
+
+    # 4. Running now
+    s = section("Running right now", "Programs running from places you can write to without admin rights.")
+    flagged = 0
+    for p in procs:
+        st, risk = signed(p)[0], location_risk(p)
+        if st == "Valid":
+            continue
+        level = "bad" if st == "HashMismatch" or risk == "temp" else "info"
+        flagged += level == "bad"
+        threat_paths.add(p)
+        add(s, level, os.path.basename(p), f"{trust(p).capitalize()}, running from {os.path.dirname(p)}",
+            [{"kind": "scan", "path": p, "label": "Scan with Defender"}, {"kind": "show", "path": p, "label": "Show file"}])
+    if not s["items"]:
+        add(s, "ok", f"{len(procs)} programs checked", "All are signed by their makers.")
+
+    # 5. Downloads and Desktop
+    s = section("Downloads and Desktop", "Files that pretend to be something else, and programs with no known maker.")
+    for f in loose:
+        if is_eicar(f):
+            threat_paths.add(f)
+            add(s, "bad", os.path.basename(f), "Antivirus TEST file (EICAR). It is harmless, and finding it shows this check works. "
+                f"You can delete it. In {os.path.dirname(f)}",
+                [{"kind": "scan", "path": f, "label": "Scan with Defender"}, {"kind": "show", "path": f, "label": "Show file"}])
+        if DISGUISED.search(os.path.basename(f)):
+            threat_paths.add(f)
+            add(s, "bad", os.path.basename(f), f"Disguised file: it looks like a document or picture but is really a program. Do not open it. In {os.path.dirname(f)}",
+                [{"kind": "scan", "path": f, "label": "Scan with Defender"}, {"kind": "show", "path": f, "label": "Show file"}])
+    broken = [f for f in programs[:60] if signed(f)[0] == "HashMismatch"]
+    for f in broken:
+        threat_paths.add(f)
+        add(s, "bad", os.path.basename(f), f"Its signature is broken: the file was changed after its maker signed it. In {os.path.dirname(f)}",
+            [{"kind": "scan", "path": f, "label": "Scan with Defender"}, {"kind": "show", "path": f, "label": "Show file"}])
+    unsigned = [f for f in programs[:60] if signed(f)[0] not in ("Valid", "HashMismatch")]
+    if unsigned:
+        for f in unsigned[:8]:
+            threat_paths.add(f)
+        add(s, "info", f"{len(unsigned)} program file(s) with no signature",
+            "Not signed by a known maker. That is common for small tools, but only run ones you downloaded yourself from a site you trust: "
+            + ", ".join(os.path.basename(f) for f in unsigned[:8]) + (" …" if len(unsigned) > 8 else ""),
+            [{"kind": "scan", "path": str(DOWNLOADS), "label": "Scan Downloads with Defender"}])
+        threat_paths.add(str(DOWNLOADS))
+    odd = [f for f in loose if Path(f).suffix.lower() in {".scr", ".pif", ".hta", ".vbe", ".jse", ".wsf"}]
+    if odd:
+        add(s, "warn", f"{len(odd)} unusual script or screensaver file(s)",
+            "These file types are rarely needed and often used by malware: " + ", ".join(os.path.basename(f) for f in odd[:8]))
+    if not s["items"]:
+        add(s, "ok", f"{len(loose):,} files checked", "No disguised or unsigned program files.")
+
+    # 6. Hosts file
+    say("Checking the hosts file…")
+    s = section("Hosts file", "A Windows file that can redirect websites. Malware edits it to send you to fake sites or block antivirus updates.")
+    entries = []
+    try:
+        for line in (WINDIR / "System32" / "drivers" / "etc" / "hosts").read_text(encoding="utf-8", errors="ignore").splitlines():
+            parts = line.split("#")[0].split()
+            if len(parts) >= 2 and not all(h in ("localhost", "ip6-localhost", "ip6-loopback") for h in parts[1:]):
+                entries += [(parts[0], h) for h in parts[1:]]
+    except OSError:
+        pass
+    redirects = [(ip, h) for ip, h in entries if ip not in ("0.0.0.0", "127.0.0.1", "::1", "::")
+                 and any(w in h.lower() for w in HOSTS_WATCH)]
+    blocked = [(ip, h) for ip, h in entries if ip in ("0.0.0.0", "127.0.0.1", "::1", "::")
+               and any(w in h.lower() for w in ("windowsupdate", "kaspersky", "avast", "avg", "norton", "mcafee", "malwarebytes", "bitdefender", "defender"))]
+    hosts_act = [{"kind": "open", "what": "hosts", "label": "Show hosts file"}]
+    if redirects:
+        add(s, "bad", f"{len(redirects)} well-known site(s) are redirected",
+            "; ".join(f"{h} goes to {ip}" for ip, h in redirects[:6]), hosts_act)
+    if blocked:
+        add(s, "bad", f"{len(blocked)} security site(s) are blocked",
+            "Blocking update or antivirus sites is a classic malware trick: " + ", ".join(h for _, h in blocked[:6]), hosts_act)
+    rest = len(entries) - len(redirects) - len(blocked)
+    if rest > 0 and not (redirects or blocked):
+        add(s, "info", f"{rest} custom entr{'y' if rest == 1 else 'ies'}",
+            "Often added by ad blockers, work tools or developers. Check them if you did not add them: "
+            + ", ".join(h for _, h in entries[:5]) + (" …" if len(entries) > 5 else ""), hosts_act)
+    if not entries:
+        add(s, "ok", "Hosts file is clean", "No websites are redirected.")
+
+    items = [i for sec in res["sections"] for i in sec["items"]]
+    res["counts"] = {lv: sum(1 for i in items if i["level"] == lv) for lv in ("bad", "warn", "info", "ok")}
+    res["at"] = datetime.now().strftime("%d %b %Y %H:%M")
+    write_log("threat", {"action": f"Threat Check: {res['counts']['bad']} serious, {res['counts']['warn']} to review",
+                         "ok": not res["counts"]["bad"]})
+    return res
+
+
+def start_threat_check():
+    if tjob["running"]:
+        return {"ok": True}
+    tjob.update(running=True, progress="Starting…", result=None, error="")
+    threat_paths.clear()
+
+    def work():
+        try:
+            tjob["result"] = run_threat_check()
+        except Exception as ex:
+            tjob["error"] = str(ex)
+        tjob["running"] = False
+
+    threading.Thread(target=work, daemon=True).start()
+    return {"ok": True}
+
+
+def threat_action(kind, value):
+    """The safe actions offered next to a finding."""
+    if kind == "show" and value in threat_paths and os.path.exists(value):
+        subprocess.Popen(["explorer", "/select,", value])
+        return {"ok": True}
+    if kind == "scan" and value in threat_paths:
+        return defender_run("folder", value)
+    if kind == "startup_off":
+        return set_startup(value, False)
+    if kind == "open":
+        target = {"security": "windowsdefender:", "proxy": "ms-settings:network-proxy",
+                  "rdp": "ms-settings:remotedesktop", "tasks": "taskschd.msc",
+                  "uac": "UserAccountControlSettings.exe", "firewall": "firewall.cpl"}.get(value)
+        if value == "hosts":
+            subprocess.Popen(["explorer", "/select,", str(WINDIR / "System32" / "drivers" / "etc" / "hosts")])
+        elif target:
+            os.startfile(target)
+        return {"ok": bool(target) or value == "hosts"}
+    return {"ok": False, "message": "That action is not available."}
+
+
 # ---------- Storage breakdown (the donut chart on Home) ----------
 # Sizes of your main folders, measured in the background and remembered for an
 # hour. "Windows and programs" is whatever else is used on the drive.
@@ -1675,7 +2082,7 @@ def open_window(url):
 
 
 def busy():
-    return any(j["running"] for j in (job, fjob, rjob, sjob, ujob))
+    return any(j["running"] for j in (job, fjob, rjob, sjob, ujob, tjob))
 
 
 def watch_window(server):
@@ -1771,7 +2178,7 @@ class Handler(BaseHTTPRequestHandler):
                   "/api/speed": heavy_apps, "/api/files/recycle": lambda: rjob,
                   "/api/overview": overview, "/api/settings": lambda: SETTINGS, "/api/about": about,
                   "/api/smart": lambda: sjob, "/api/ping": self.ping,
-                  "/api/mem": memory, "/api/storage": storage_info,
+                  "/api/mem": memory, "/api/storage": storage_info, "/api/threat": lambda: tjob,
                   "/api/history/all": lambda: history(400)}
         fn = routes.get(self.path)
         if fn:
@@ -1799,6 +2206,10 @@ class Handler(BaseHTTPRequestHandler):
             self.send_json(save_settings(data))
         elif self.path == "/api/folder":
             self.send_json(open_folder(data.get("which")))
+        elif self.path == "/api/threat/scan":
+            self.send_json(start_threat_check())
+        elif self.path == "/api/threat/action":
+            self.send_json(threat_action(data.get("kind"), data.get("value")))
         elif self.path == "/api/storage/refresh":
             self.send_json(storage_info(refresh=True))
         elif self.path == "/api/smart/scan":

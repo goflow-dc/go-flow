@@ -29,6 +29,17 @@
 
     <!-- Newest version first. Copy this block for each new release. -->
     <div class="release">
+      <h2>Version 1.1.0</h2>
+      <p class="muted">Threat Check</p>
+      <ul>
+        <li><b>New: Threat Check.</b> Looks for signs of trouble a virus scan can miss: protection switched off (antivirus, firewall, Windows permission prompts), odd programs starting with Windows, suspicious scheduled tasks, unsigned programs running from temp folders, disguised files such as <code>invoice.pdf.exe</code>, and a changed hosts file or proxy.</li>
+        <li>It only looks and reports. Each finding has a plain explanation and a safe action, such as scanning the file with Microsoft Defender or turning it off at startup.</li>
+        <li>Recognises the standard EICAR antivirus test file, so you can check that detection works.</li>
+        <li>The duplicate finder no longer changes a file's "last opened" time.</li>
+      </ul>
+    </div>
+
+    <div class="release">
       <h2>Version 1.0.0</h2>
       <p class="muted">First release</p>
       <ul>

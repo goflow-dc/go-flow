@@ -15,6 +15,14 @@ local page at http://127.0.0.1:8770 that no other computer or website can reach.
   "Fix selected" cleans junk (deleted for good), moves old setup files / unzipped zips to the Recycle
   Bin, boosts memory and updates virus definitions. Duplicates are never fixed automatically: the
   Review button opens them on the Duplicates screen, because copies can be program parts or in OneDrive.
+- **Threat check** (Security): about a minute, read-only. Checks protection (antivirus, firewall,
+  UAC, Smart App Control, Remote Desktop, proxy, Defender exclusions when run as admin), startup
+  programs, non-Microsoft scheduled tasks, programs running from user-writable folders, files in
+  Downloads and Desktop (disguised names like `x.pdf.exe`, broken or missing signatures, odd script
+  types, the EICAR test file) and the hosts file. Signatures come from Windows' own check
+  (`Get-AuthenticodeSignature`); startup shortcuts are followed to the real program. It is not an
+  antivirus engine: findings offer safe actions only (scan with Defender, show the file, turn off at
+  startup, open the Windows setting) and nothing is deleted.
 - **Graphics:** Home has a storage donut (sizes of Downloads, Documents, Pictures, Videos, Music,
   Desktop, OneDrive and App data; everything else used = "Windows and programs"; measured in the
   background, about 30 seconds, remembered for an hour in `logs\storage_cache.json`; click a folder

@@ -226,6 +226,28 @@ textarea{font:inherit;width:100%;min-height:110px;padding:10px;border:1px solid 
 @media (max-width:1000px){.charts{grid-template-columns:minmax(0,1fr)}}
 @media (max-width:520px){.donutwrap{grid-template-columns:minmax(0,1fr);justify-items:center}.legend{width:100%}}
 
+/* Threat check */
+.verdict{display:flex;align-items:center;gap:16px;padding:18px 20px;border-radius:14px;margin-top:16px;background:var(--accent-2)}
+.verdict.warn{background:var(--warn-bg)}
+.verdict.bad{background:var(--bad-bg)}
+.verdict .vi{width:52px;height:52px;border-radius:50%;display:grid;place-items:center;flex:none;background:var(--accent);color:var(--accent-ink);animation:pop .5s cubic-bezier(.3,1.6,.5,1)}
+.verdict.warn .vi{background:var(--warn);color:#241500}
+.verdict.bad .vi{background:var(--bad);color:#fff}
+.verdict .vi svg{width:28px;height:28px;stroke-width:2.4}
+.verdict b{display:block;font-size:19px}
+.tsec{margin-top:22px}
+.tsec h3{font-size:16px;margin:0 0 2px}
+.finding{display:flex;gap:12px;align-items:flex-start;padding:11px 12px;border-radius:10px;background:var(--card-2);border:1px solid var(--line);margin-top:8px}
+.finding .fi{width:24px;height:24px;border-radius:50%;display:grid;place-items:center;flex:none;margin-top:1px;background:var(--accent-2);color:var(--accent)}
+.finding .fi svg{width:14px;height:14px;stroke-width:2.6}
+.finding.info .fi{background:var(--info-bg);color:var(--info)}
+.finding.warn .fi{background:var(--warn-bg);color:var(--warn)}
+.finding.bad{border-color:var(--bad)}
+.finding.bad .fi{background:var(--bad);color:#fff}
+.finding .grow{flex:1;min-width:0}
+.finding .sub{word-break:break-word}
+.finding .acts{display:flex;flex-wrap:wrap;gap:6px;margin-top:8px}
+
 /* Motion */
 @keyframes enter{from{opacity:0;transform:translateY(12px)}to{opacity:1;transform:none}}
 @keyframes pop{from{transform:scale(.3);opacity:0}to{transform:scale(1);opacity:1}}
@@ -301,6 +323,7 @@ button.primary:active,button.danger:active{transform:scale(.97)}
     <button data-tab="programs">Programs</button>
     <div class="grp">Security</div>
     <button data-tab="virus">Virus scan</button>
+    <button data-tab="threat">Threat check</button>
     <button data-tab="updates">Updates</button>
     <button data-tab="protect">Protection</button>
     <div class="grp">System</div>
@@ -520,6 +543,19 @@ button.primary:active,button.danger:active{transform:scale(.97)}
     <div id="threats" class="sub">Loading…</div>
   </section>
 
+  <section class="card hidden" data-panel="threat">
+    <div class="row spread">
+      <div>
+        <h2>Threat check</h2>
+        <div class="sub">Looks for signs of trouble a virus scan can miss: protection switched off, odd things starting with Windows, disguised files,
+          a changed hosts file. It only looks and reports. It works alongside your antivirus and does not replace it.</div>
+      </div>
+      <button class="primary" id="thBtn">Run Threat Check</button>
+    </div>
+    <div id="thMsg" class="msg hidden"></div>
+    <div id="thOut"></div>
+  </section>
+
   <section class="card hidden" data-panel="large">
     <h2>Large files</h2>
     <div class="sub">The biggest files in your folders (system and app folders are skipped). Ticked files go to the Recycle Bin, so you can still restore them.</div>
@@ -726,6 +762,9 @@ const ICONS = {
   startup: '<path d="M12 3v9"/><path d="M6.3 6.3a8 8 0 1 0 11.4 0"/>',
   programs: '<rect x="3" y="3" width="7" height="7" rx="1.5"/><rect x="14" y="3" width="7" height="7" rx="1.5"/><rect x="3" y="14" width="7" height="7" rx="1.5"/><rect x="14" y="14" width="7" height="7" rx="1.5"/>',
   virus: '<path d="M12 3l8 3v6c0 4.5-3.4 8.2-8 9-4.6-.8-8-4.5-8-9V6z"/><path d="M9 12l2 2 4-4"/>',
+  threat: '<circle cx="11" cy="11" r="7"/><path d="M20 20l-4-4"/><path d="M11 8v3.5"/><circle cx="11" cy="14" r=".6"/>',
+  info: '<path d="M12 11v6"/><circle cx="12" cy="7.5" r=".7"/>',
+  alert: '<path d="M12 6v7"/><circle cx="12" cy="17" r=".7"/>',
   updates: '<path d="M20 11a8 8 0 0 0-14.9-3"/><path d="M4 4v4h4"/><path d="M4 13a8 8 0 0 0 14.9 3"/><path d="M20 20v-4h-4"/>',
   protect: '<path d="M3 12a9 9 0 1 0 3-6.7"/><path d="M3 4v5h5"/><path d="M12 8v4l3 2"/>',
   health: '<path d="M3 12h4l2-5 4 10 2-5h6"/>',
@@ -1462,6 +1501,48 @@ $("scanBtn").addEventListener("click", () => { const e = $("junkEmpty"); if (e) 
 $("largeOut").innerHTML = art("large", "Find what fills your disk", "Pick a folder and press Find large files.");
 $("dupeOut").innerHTML = art("dupes", "Find files saved twice", "Press Find duplicates. One copy of every file is always kept.");
 $("dlOut").innerHTML = art("downloads", "Tidy your Downloads", "Finds setup files and zips you have not opened for a while.");
+
+// ---- Threat check ----
+$("thOut").innerHTML = art("threat", "Check for signs of trouble", "Takes about a minute. Nothing is changed or deleted.");
+function drawThreat(res) {
+  const c = res.counts, level = c.bad ? "bad" : c.warn ? "warn" : "ok";
+  const title = c.bad ? `${c.bad} serious thing${c.bad > 1 ? "s" : ""} to look at now`
+    : c.warn ? `${c.warn} thing${c.warn > 1 ? "s" : ""} worth reviewing` : "No signs of trouble";
+  const sub = c.bad ? "Check the red items below. If you do not recognise something, scan it with your antivirus."
+    : c.warn ? "Nothing serious. Have a look at the amber items when you have a minute."
+    : "Your protection is on and nothing unusual was found." + (c.info ? ` ${c.info} note${c.info > 1 ? "s" : ""} below.` : "");
+  const ICON = { ok: "check", info: "info", warn: "alert", bad: "alert" };
+  $("thOut").innerHTML = `<div class="verdict ${level}"><span class="vi">${icon(level === "ok" ? "check" : "alert")}</span>
+      <span><b>${title}</b><span class="sub">${sub} Checked ${esc(res.at)}.</span></span></div>` +
+    res.sections.map(s => `<div class="tsec"><h3>${esc(s.title)}</h3><div class="sub">${esc(s.about)}</div>` +
+      s.items.map(i => `<div class="finding ${i.level}"><span class="fi">${icon(ICON[i.level])}</span><div class="grow">
+        <b>${esc(i.title)}</b>${i.detail ? `<div class="sub">${esc(i.detail)}</div>` : ""}
+        ${i.actions.length ? `<div class="acts">${i.actions.map(a => `<button class="small" data-kind="${esc(a.kind)}" data-value="${esc(a.path || a.id || a.what || "")}">${esc(a.label)}</button>`).join("")}</div>` : ""}
+      </div></div>`).join("") + "</div>").join("");
+  $("thOut").querySelectorAll("[data-kind]").forEach(b => b.onclick = async () => {
+    const kind = b.dataset.kind;
+    if (kind === "startup_off" && !await ask("Turn this off at startup?", b.closest(".finding").querySelector("b").textContent,
+      "The program stays installed. You can turn it back on in Startup apps.", "Turn off")) return;
+    const r = await api("/api/threat/action", { kind, value: b.dataset.value });
+    if (kind === "scan") { if (r.ok) { openTab("virus"); pollJob(); } else show($("thMsg"), r.message || "Could not start the scan.", true); }
+    else if (kind === "startup_off") { show($("thMsg"), r.ok ? "Turned off. It will not start with Windows next time." : r.message, !r.ok); if (r.ok) b.disabled = true; }
+    else if (!r.ok) show($("thMsg"), r.message || "Could not open that.", true);
+  });
+}
+$("thBtn").onclick = async () => {
+  await api("/api/threat/scan", {});
+  $("thBtn").disabled = true; $("thMsg").classList.add("hidden");
+  $("thOut").innerHTML = `<div class="smart-run" style="margin-top:20px"><div class="radar"><i></i><i></i><i></i><span>${icon("threat")}</span></div>
+    <div><h2>Checking…</h2><div class="sub" id="thProg">Starting…</div><div class="sub" style="margin-top:6px">Nothing is changed or deleted.</div></div></div>`;
+  const tick = async () => {
+    const j = await api("/api/threat");
+    if (j.running) { const p = $("thProg"); if (p) p.textContent = j.progress; return setTimeout(tick, 700); }
+    $("thBtn").disabled = false; $("thBtn").textContent = "Check again";
+    if (j.error) { $("thOut").innerHTML = ""; return show($("thMsg"), "Something went wrong: " + j.error, true); }
+    drawThreat(j.result);
+  };
+  tick();
+};
 
 // ---- small effects ----
 function countUp(el, to, fmt, ms) {
